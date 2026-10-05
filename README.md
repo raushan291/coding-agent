@@ -17,8 +17,11 @@ reasons.
   slice.
 - **Cites its sources.** Answers reference specific files, symbol names, and line numbers.
 - **Any LLM provider.** OpenAI, Anthropic, or Google — set it in the config, no code changes.
-- **Runs on your machine.** The vector store is local (ChromaDB on disk); your code is never sent
-  anywhere except as embeddings to the embedder you configure.
+- **Swappable vector store.** ChromaDB on disk by default, or Qdrant (local container or hosted) —
+  set `vector_store.provider` and nothing else changes.
+- **Runs on your machine.** With the default ChromaDB store your code never leaves the disk
+  index; the only outbound call is the embedder you configure. Qdrant is the exception — it sends
+  chunks wherever your Qdrant instance lives.
 
 ---
 
@@ -75,13 +78,20 @@ CHROMA_COLLECTION=codebase
 EMBEDDING_MODEL=text-embedding-3-small
 
 
-#Langsmith
+# Qdrant (only needed if vector_store.provider is qdrant)
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=your-key-here
+
+
+# Langsmith
 LANGSMITH_TRACING=false
 LANGSMITH_API_KEY=your-key-here
 ```
 
 Only the key for your configured provider is needed. One `.env` in this repo's root is enough for
-every project — `load_dotenv()` resolves relative to the package, not the working directory.
+every project — the path is resolved from the installed package, not the working directory, so you
+can launch the agent from any directory. See the note below the config section if you're using a
+non-editable install.
 
 **3. Run it**
 
@@ -93,12 +103,16 @@ cd /path/to/your/project
 coding-agent
 ```
 
-Each project you run it in gets its own `.chromadb/` index, so switching projects just means
-switching directories.
+With the default ChromaDB store, each project you run it in gets its own `.chromadb/` index, so
+switching projects just means switching directories.
 
 > **First run in a project takes a while.** The embedding model downloads on first use, and every
 > chunk is embedded individually — indexing a mid-sized repo can take several minutes. The result
 > is cached in that project's `.chromadb/`, so subsequent starts there are fast.
+
+> **Qdrant is not per-project.** With `vector_store.provider: qdrant` the collection is a single
+> shared one named by `qdrant.collection_name` — it is not scoped to the directory you launched
+> from. See the `qdrant` config section below before pointing it at more than one repo.
 
 ---
 
@@ -107,7 +121,7 @@ switching directories.
 | Command | What it does |
 |---|---|
 | `/ask <question>` | Search the codebase and answer the question |
-| `/show_semantic_index` | Print every chunk in the index with its metadata and embedding |
+| `/show_semantic_index` | Print every chunk in the index with its metadata and embedding (Qdrant caps this at the first 1000 points) |
 | `/exit` or `/quit` | Quit |
 
 Anything else prints the list of available commands.
@@ -116,7 +130,9 @@ Anything else prints the list of available commands.
 
 ## Configuration
 
-All settings live in `coding_agent/config.yaml`. Environment variables are used only for API keys.
+All settings live in `coding_agent/config.yaml`. Environment variables cover credentials and
+connection details only — provider API keys, plus `QDRANT_URL` / `QDRANT_API_KEY` when using
+Qdrant.
 
 `config.yaml` is read from alongside the installed package. With an editable install
 (`pipx install --editable .`) that means the copy in this repo — edit it and the change applies on
@@ -142,10 +158,20 @@ embeddings:
   provider: huggingface
   model: sentence-transformers/all-MiniLM-L6-v2
 
+vector_store:
+  provider: chromadb      # chromadb | qdrant
+
 chromadb:
   persist_dir: .chromadb/
   collection_name: codebase
+
+qdrant:
+  collection_name: codebase
 ```
+
+> **The `.env` location follows the same rule as `config.yaml`.** It is resolved from the installed
+> package, so with a non-editable install the agent looks for `.env` inside the virtualenv rather
+> than this repo. Use `pipx install --editable .` if you want to keep keys here.
 
 ### `llm`
 
@@ -164,7 +190,17 @@ chromadb:
 
 > **The embedder must stay the same between runs.** Indexing and retrieval both call
 > `get_embedder()`. If you change this model after indexing, existing chunks were embedded with
-> the old model and search results will be nonsense — delete `.chromadb/` and re-index.
+> the old model and search results will be nonsense — drop the existing index and re-index (for
+> ChromaDB, delete `.chromadb/`; for Qdrant, delete the collection).
+
+### `vector_store`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `provider` | `chromadb` | Which backend to index into and search — `chromadb` or `qdrant` |
+
+This is the only switch you need to flip. The indexer and retriever are each resolved through a
+factory at call time, so the rest of the app never imports a concrete backend directly.
 
 ### `chromadb`
 
@@ -172,6 +208,28 @@ chromadb:
 |---|---|---|
 | `persist_dir` | `.chromadb/` | Where the vector store is written |
 | `collection_name` | `codebase` | ChromaDB collection holding the chunks |
+
+Local, embedded, and per-directory — the default for everyday use.
+
+### `qdrant`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `collection_name` | `codebase` | Qdrant collection holding the chunks |
+
+Connection details come from the `QDRANT_URL` and `QDRANT_API_KEY` env vars, not from
+`config.yaml`. Either point `QDRANT_URL` at a local container or a hosted instance; leave
+`QDRANT_API_KEY` unset for local Docker without auth.
+
+> **Qdrant collections are global, not per-directory.** The name in `config.yaml` is not scoped to
+> the repo you launch from, so one collection cannot hold two projects side by side. Indexing also
+> *skips* entirely when the collection already has points, which means running the agent in a
+> second project against a collection you already populated will silently answer questions about
+> the first project. Use a distinct `collection_name` per project, or stay on ChromaDB, which
+> isolates itself under each directory's `.chromadb/`.
+
+Unlike ChromaDB there is no local `persist_dir` — the index lives on the Qdrant server, and
+"clearing" it means dropping the collection.
 
 ---
 
@@ -185,14 +243,17 @@ source files
     ├─ sliding window ────────► for text/config files, and AST fallback
     │
     ▼
-embed each chunk ─────────────► ChromaDB (persistent, on disk)
+embed each chunk ─────────────► configured vector store
+                                 (ChromaDB on disk, or Qdrant)
     │
     ▼
 your question ──► agent ──► search_codebase tool ──► top-5 chunks ──► answer
 ```
 
 The agent is required to call `search_codebase` before answering, and is instructed to say so
-explicitly if the answer isn't in the codebase.
+explicitly if the answer isn't in the codebase. That tool resolves a retriever through
+`context/retrievers/factory.py` on every call, so the backend is chosen from config at query time
+rather than fixed at import.
 
 ---
 
@@ -210,9 +271,13 @@ coding_agent/
 ├── context/
 │   ├── indexers/
 │   │   ├── code_parser.py           # tree-sitter parsing + chunking
-│   │   └── semantic_chroma.py       # embed + store chunks
+│   │   ├── factory.py               # picks the indexer / inspector for the backend
+│   │   ├── semantic_chroma.py       # embed + store chunks (ChromaDB)
+│   │   └── semantic_qdrant.py       # embed + store chunks (Qdrant)
 │   └── retrievers/
-│       └── semantic_chroma.py       # embed query + top-k search
+│       ├── factory.py               # picks the retriever for the backend
+│       ├── semantic_chroma.py       # embed query + top-k search (ChromaDB)
+│       └── semantic_qdrant.py       # embed query + top-k search (Qdrant)
 ├── llm/
 │   └── factory.py                   # provider switching for LLM and embedder
 └── observability/
@@ -244,8 +309,13 @@ duplicates.
 | `type` | `function`, `class`, or `block` |
 | `start_line` / `end_line` | 1-based line range |
 
-Chunk IDs are `source::name::start_line`, so re-indexing updates existing chunks instead of
-duplicating them.
+On ChromaDB, chunk IDs are `source::name::start_line`, so re-indexing updates existing chunks
+instead of duplicating them. Qdrant relies on LangChain-generated IDs instead.
+
+**Both indexers skip work when the store already has data** — ChromaDB checks `collection.count()`,
+Qdrant checks the collection's point count. This avoids duplicate chunks on a second run, but it
+also means neither picks up edits to code you've already indexed. To re-index after changing code,
+drop the index: delete `.chromadb/`, or delete the Qdrant collection.
 
 **Skipped directories:** `.venv`, `venv`, `__pycache__`, `.git`, `node_modules`, `dist`, `build`.
 
@@ -257,8 +327,21 @@ stays at `WARNING` so third-party libraries (OpenAI, Google, httpcore) don't flo
 
 ## Troubleshooting
 
-**Search results look unrelated to the question.** The embedder changed since indexing — delete
-that project's `.chromadb/` and restart to rebuild.
+**Search results look unrelated to the question.** The embedder changed since indexing — drop the
+existing index and restart to rebuild (`.chromadb/`, or the Qdrant collection).
+
+**Answers are about the wrong project.** You're on Qdrant and reused a `collection_name` that was
+already populated from a different repo. Because indexing skips non-empty collections, the first
+project's index is being reused silently. Give each project its own collection name, or switch back
+to ChromaDB.
+
+**Qdrant errors on startup or `/ask`.** `QDRANT_URL` / `QDRANT_API_KEY` are missing or wrong. They
+come from `.env`, not `config.yaml`, and the key is read the same way as your LLM key — see the note
+above. Check the server is reachable at that URL; local Qdrant usually needs no API key.
+
+**Qdrant reports a collection of 0 points but you expected an index.** The collection name in
+`config.yaml` doesn't match what's on the server, so you queried an empty one. List the server's
+collections and reconcile the name.
 
 **`command not found: coding-agent`.** `~/.local/bin` isn't on your `PATH`. pipx prints the exact
 `export PATH=...` line to run at install time.
@@ -276,4 +359,8 @@ is read from this repo's root `.env` regardless of where you launched from.
 indexed chunk is logged at `DEBUG`.
 
 **A project re-indexes every time.** ChromaDB found no existing index. Confirm `.chromadb/` exists
-in the directory you're running from and isn't being cleaned up.
+in the directory you're running from and isn't being cleaned up. (On Qdrant this would show up
+instead as an index that never gets written — see "Qdrant errors" above.)
+
+**Edits to indexed code are ignored.** Expected: both indexers skip when the store already holds
+data. Drop the index to pick up your changes.

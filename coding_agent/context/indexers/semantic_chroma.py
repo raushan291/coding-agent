@@ -10,8 +10,8 @@ logger = get_logger(__name__)
 
 def index_codebase(repo_path: str) -> chromadb.Collection:
     """
-    Parse all Python files in repo_path, embed each chunk and store in ChromaDB.
-    Returns the ChromaDB collection for use by the retriever.
+    Parse all source files in repo_path, embed each chunk and store in ChromaDB.
+    Returns the ChromaDB collection. Skips indexing if collection already has data.
     """
     embedder = get_embedder()
     chroma_client = chromadb.PersistentClient(path=config["chromadb"]["persist_dir"])
@@ -19,8 +19,11 @@ def index_codebase(repo_path: str) -> chromadb.Collection:
         name=config["chromadb"]["collection_name"]
     )
 
-    logger.info(f"Starting semantic indexing of {repo_path}")
+    if collection.count() > 0:
+        logger.info(f"Loaded existing index with {collection.count()} chunks")
+        return collection
 
+    logger.info(f"Starting semantic indexing of {repo_path}")
     files = get_source_files(repo_path)
 
     for filepath in files:
@@ -32,10 +35,7 @@ def index_codebase(repo_path: str) -> chromadb.Collection:
 
         for chunk in chunks:
             embedding = embedder.embed_query(chunk.content)
-
-            # Unique ID for each chunk -> source + name + line prevents duplicates on re-index
             doc_id = f"{chunk.source}::{chunk.name}::{chunk.start_line}"
-
             collection.upsert(
                 ids=[doc_id],
                 embeddings=[embedding],
@@ -54,3 +54,26 @@ def index_codebase(repo_path: str) -> chromadb.Collection:
 
     logger.info(f"Semantic indexing complete. Total chunks: {collection.count()}")
     return collection
+
+
+def show_index(collection: chromadb.Collection) -> None:
+    """Display all documents stored in the ChromaDB collection."""
+    from rich.console import Console
+
+    console = Console()
+    results = collection.get(include=["documents", "metadatas", "embeddings"])
+    console.print(f"\n[bold]Semantic Index — {collection.count()} chunks[/bold]\n")
+
+    for i, (doc, meta, emb) in enumerate(
+        zip(results["documents"], results["metadatas"], results["embeddings"])
+    ):
+        console.print(
+            f"[bold cyan]--- Chunk {i + 1} --------------------------[/bold cyan]"
+        )
+        console.print(f"  File     : {meta['source']}")
+        console.print(f"  Name     : {meta['name']} ({meta['type']})")
+        console.print(f"  Lines    : {meta['start_line']} - {meta['end_line']}")
+        console.print(
+            f"  Embedding: [{', '.join(f'{v:.4f}' for v in emb[:5])}...] ({len(emb)} dims)"
+        )
+        console.print(f"  Code     :\n[dim]{doc[:300]}[/dim]\n")

@@ -8,6 +8,13 @@ embeddings:
   provider: huggingface             
   model: sentence-transformers/all-MiniLM-L6-v2
 
+vector_store:
+  provider: chromadb  # chromadb | qdrant
+
+
+qdrant:
+  collection_name: codebase
+
 
 chromadb:
   persist_dir: .chromadb/

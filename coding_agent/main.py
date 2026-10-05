@@ -1,59 +1,26 @@
-import os
 from pathlib import Path
 
-import chromadb
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.prompt import Prompt
 
 from coding_agent.agent.orchestrator import handle_query
 from coding_agent.config import config
-from coding_agent.context.indexers.semantic_chroma import index_codebase
+from coding_agent.context.indexers.factory import get_index_inspector, get_indexer
 from coding_agent.llm.factory import get_embedder, get_llm
 from coding_agent.observability.logger import get_logger
 
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 console = Console()
 logger = get_logger(__name__)
 
 
-def get_or_create_index() -> chromadb.Collection:
-    """Load existing index or create a new one by indexing current directory."""
-    chroma_client = chromadb.PersistentClient(path=config["chromadb"]["persist_dir"])
-    collection = chroma_client.get_or_create_collection(
-        name=config["chromadb"]["collection_name"]
-    )
-
-    if collection.count() > 0:
-        logger.info(f"Loaded existing index with {collection.count()} chunks")
-        console.print(f"[dim]Loaded existing index — {collection.count()} chunks[/dim]")
-        return collection
-
-    # Auto-index the current working directory
+def get_or_create_index():
     repo_path = str(Path.cwd())
-    logger.info(f"Indexing repo: {repo_path}")
-    console.print(f"[dim]Indexing {repo_path}...[/dim]")
-    return index_codebase(repo_path)
-
-
-def show_semantic_index(collection: chromadb.Collection) -> None:
-    """Display all documents stored in the ChromaDB collection."""
-    results = collection.get(include=["documents", "metadatas", "embeddings"])
-    console.print(f"\n[bold]Semantic Index — {collection.count()} chunks[/bold]\n")
-
-    for i, (doc, meta, emb) in enumerate(
-        zip(results["documents"], results["metadatas"], results["embeddings"])
-    ):
-        console.print(
-            f"[bold cyan]--- Chunk {i + 1} --------------------------[/bold cyan]"
-        )
-        console.print(f"  File     : {meta['source']}")
-        console.print(f"  Name     : {meta['name']} ({meta['type']})")
-        console.print(f"  Lines    : {meta['start_line']} - {meta['end_line']}")
-        console.print(
-            f"  Embedding: [{', '.join(f'{v:.4f}' for v in emb[:5])}...] ({len(emb)} dims)"
-        )
-        console.print(f"  Code     :\n[dim]{doc[:300]}[/dim]\n")
+    logger.info(f"Checking index for: {repo_path}")
+    console.print(f"[dim]Checking index for {repo_path}...[/dim]")
+    return get_indexer()(repo_path)
 
 
 def initialize():
@@ -67,16 +34,16 @@ def initialize():
         f"[dim]Embedder: {config['embeddings']['provider']} / {config['embeddings']['model']}[/dim]"
     )
 
-    collection = get_or_create_index()
-    console.print(f"[green]✓ Ready — {collection.count()} chunks indexed[/green]\n")
-    return llm, embedder, collection
+    index = get_or_create_index()
+    console.print("[green]✓ Ready[/green]\n")
+    return llm, embedder, index
 
 
 def run():
     logger.info("Starting Coding Agent")
     console.print("\n[bold blue]Coding Agent[/bold blue] — RAG-powered code assistant")
 
-    llm, embedder, collection = initialize()
+    llm, embedder, index = initialize()
 
     console.print("Type [bold]'/exit'[/bold] or [bold]'/quit'[/bold] to quit\n")
 
@@ -97,7 +64,7 @@ def run():
             console.print(response)
         elif user_input == "/show_semantic_index":
             logger.info("Showing semantic index")
-            show_semantic_index(collection)
+            get_index_inspector()(index)
         else:
             logger.warning(f"Unknown command received: {user_input}")
             console.print("[yellow]Unknown command. Try:[/yellow]")
