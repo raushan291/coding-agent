@@ -19,6 +19,8 @@ reasons.
 - **Any LLM provider.** OpenAI, Anthropic, or Google — set it in the config, no code changes.
 - **Swappable vector store.** ChromaDB on disk by default, or Qdrant (local container or hosted) —
   set `vector_store.provider` and nothing else changes.
+- **Hybrid retrieval.** Vector search runs alongside a keyword (BM25) search and the two results
+  are fused, so exact identifiers surface even when embeddings would rank them lower.
 - **Runs on your machine.** With the default ChromaDB store your code never leaves the disk
   index; the only outbound call is the embedder you configure. Qdrant is the exception — it sends
   chunks wherever your Qdrant instance lives.
@@ -121,7 +123,7 @@ switching projects just means switching directories.
 | Command | What it does |
 |---|---|
 | `/ask <question>` | Search the codebase and answer the question |
-| `/show_semantic_index` | Print every chunk in the index with its metadata and embedding (Qdrant caps this at the first 1000 points) |
+| `/show_semantic_index` | Print every chunk in the index with its metadata and embedding |
 | `/exit` or `/quit` | Quit |
 
 Anything else prints the list of available commands.
@@ -154,12 +156,16 @@ llm:
   model: gemini-2.5-flash
   temperature: 0.0
 
+rag:
+  mode: hybrid           # semantic | hybrid
+
 embeddings:
   provider: huggingface
   model: sentence-transformers/all-MiniLM-L6-v2
 
 vector_store:
   provider: chromadb      # chromadb | qdrant
+  retrieval_mode: hybrid  # dense | sparse | hybrid
 
 chromadb:
   persist_dir: .chromadb/
@@ -193,14 +199,27 @@ qdrant:
 > the old model and search results will be nonsense — drop the existing index and re-index (for
 > ChromaDB, delete `.chromadb/`; for Qdrant, delete the collection).
 
+### `rag`
+
+| Key | Default | Accepts | Purpose |
+|---|---|---|---|
+| `mode` | `hybrid` | `semantic`, `hybrid` | Use pure vector search, or vector + keyword search |
+
+`semantic` always searches embeddings only. `hybrid` adds a keyword (BM25) leg — see
+[Hybrid retrieval](#hybrid-retrieval) for how each backend implements it.
+
 ### `vector_store`
 
 | Key | Default | Purpose |
 |---|---|---|
 | `provider` | `chromadb` | Which backend to index into and search — `chromadb` or `qdrant` |
+| `retrieval_mode` | `hybrid` | With `rag.mode: hybrid`, which legs to run — `dense`, `sparse`, or `hybrid` |
 
-This is the only switch you need to flip. The indexer and retriever are each resolved through a
-factory at call time, so the rest of the app never imports a concrete backend directly.
+`provider` is the only switch that changes storage: the indexer and retriever are each resolved
+through a factory at call time, so the rest of the app never imports a concrete backend directly.
+
+`retrieval_mode` is read by whichever hybrid retriever `provider` selects, and does nothing when
+`rag.mode` is `semantic`:
 
 ### `chromadb`
 
@@ -233,6 +252,44 @@ Unlike ChromaDB there is no local `persist_dir` — the index lives on the Qdran
 
 ---
 
+## Hybrid retrieval
+
+With `rag.mode: hybrid`, `search_codebase` runs a vector search alongside a keyword search. The
+two backends implement it differently, because only Qdrant stores sparse vectors:
+
+| | ChromaDB | Qdrant |
+|---|---|---|
+| **Dense leg** | `Collection.query` over the stored embeddings | `RetrievalMode.DENSE` |
+| **Keyword leg** | `rank_bm25`'s `BM25Okapi`, computed in-process over the stored documents | `FastEmbedSparse("Qdrant/bm25")`, queried server-side |
+| **Fusion** | Reciprocal rank fusion in-process | Server-side |
+| **Extra dependency** | `rank-bm25` | `fastembed` |
+
+`vector_store.retrieval_mode` chooses which legs run:
+
+| Value | What runs |
+|---|---|
+| `dense` | The vector leg only. On ChromaDB this returns the same results as `rag.mode: semantic`. |
+| `sparse` | The keyword leg only. |
+| `hybrid` | Both, fused with reciprocal rank fusion (`score = Σ 1/(60 + rank)` across the two ranked lists), then cut to `k`. |
+
+Notes:
+
+- The ChromaDB keyword leg loads the whole index into memory and builds a `BM25Okapi` once per
+  process, on the first query. The build is logged at `INFO` and takes a second or two on a
+  large repo; later queries only score against it.
+- Tokenization lowercases and splits on non-alphanumerics, then adds camelCase subtokens, so
+  `get_retriever` also matches `retriever`, and `getRetriever` matches `get`.
+- `sparse` returns nothing for a query with no alphanumeric characters, because BM25 has no terms
+  to match. `hybrid` still falls back to the dense leg in that case.
+- `distance` remains the ChromaDB cosine distance for every returned chunk, so *lower is more
+  similar* holds in all three modes. Chunks the keyword leg found on its own get their distance
+  from a follow-up lookup; if that lookup fails the value is `None`.
+- The two backends will not rank identically. Qdrant's BM25 is a trained sparse encoder over BPE
+  subtokens; ChromaDB's is lexical BM25 over the tokenizer described above. Expect overlap, not
+  parity.
+
+---
+
 ## How it works
 
 ```
@@ -245,15 +302,22 @@ source files
     ▼
 embed each chunk ─────────────► configured vector store
                                  (ChromaDB on disk, or Qdrant)
-    │
-    ▼
-your question ──► agent ──► search_codebase tool ──► top-5 chunks ──► answer
+
+your question ──► agent ──► search_codebase tool
+                               │
+                               ├─ dense leg ────► vector store
+                               ├─ keyword leg ──► BM25 (ChromaDB) / sparse vectors (Qdrant)
+                               ▼
+                          reciprocal rank fusion
+                               │
+                               ▼
+                        top-5 chunks ──► answer
 ```
 
 The agent is required to call `search_codebase` before answering, and is instructed to say so
 explicitly if the answer isn't in the codebase. That tool resolves a retriever through
-`context/retrievers/factory.py` on every call, so the backend is chosen from config at query time
-rather than fixed at import.
+`context/retrievers/factory.py` on every call, so the backend and the search mode are both chosen
+from config at query time rather than fixed at import.
 
 ---
 
@@ -272,10 +336,13 @@ coding_agent/
 │   ├── indexers/
 │   │   ├── code_parser.py           # tree-sitter parsing + chunking
 │   │   ├── factory.py               # picks the indexer / inspector for the backend
+│   │   ├── hybrid_qdrant.py         # dense + sparse vectors (Qdrant, hybrid mode)
 │   │   ├── semantic_chroma.py       # embed + store chunks (ChromaDB)
 │   │   └── semantic_qdrant.py       # embed + store chunks (Qdrant)
 │   └── retrievers/
-│       ├── factory.py               # picks the retriever for the backend
+│       ├── factory.py               # picks the retriever for backend + search mode
+│       ├── hybrid_chroma.py         # dense + BM25 fused in-process (ChromaDB)
+│       ├── hybrid_qdrant.py         # dense + sparse fused server-side (Qdrant)
 │       ├── semantic_chroma.py       # embed query + top-k search (ChromaDB)
 │       └── semantic_qdrant.py       # embed query + top-k search (Qdrant)
 ├── llm/
@@ -316,6 +383,12 @@ instead of duplicating them. Qdrant relies on LangChain-generated IDs instead.
 Qdrant checks the collection's point count. This avoids duplicate chunks on a second run, but it
 also means neither picks up edits to code you've already indexed. To re-index after changing code,
 drop the index: delete `.chromadb/`, or delete the Qdrant collection.
+
+**Hybrid retrieval is the shipped default.** `rag.mode: hybrid` means ChromaDB queries go through
+`hybrid_chroma.retrieve`. Its BM25 index is built once per process, on the first query, and reused
+for the rest of the session — safe because indexing only runs at startup, so the stored documents
+cannot change underneath it. Rebuilding `.chromadb/` while the CLI is running therefore isn't seen
+until you restart. Qdrant's hybrid path builds no local index; `fastembed` handles the sparse side.
 
 **Skipped directories:** `.venv`, `venv`, `__pycache__`, `.git`, `node_modules`, `dist`, `build`.
 
@@ -364,3 +437,12 @@ instead as an index that never gets written — see "Qdrant errors" above.)
 
 **Edits to indexed code are ignored.** Expected: both indexers skip when the store already holds
 data. Drop the index to pick up your changes.
+
+**The first `/ask` takes several seconds, the rest are fast.** The BM25 index over the whole
+collection is built on the first hybrid query and cached for the session. The build is logged at
+`INFO` in `coding-agent.log`.
+
+**A term I know is in the code returns nothing.** With `vector_store.retrieval_mode: sparse` only
+the keyword leg runs, and it needs alphanumeric query terms — a punctuation-only query matches
+nothing. Switch to `hybrid` or rephrase. If it's already `hybrid`, check the chunk is actually
+indexed; both indexers skip when the store already holds data.

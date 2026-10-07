@@ -3,6 +3,9 @@ llm:
   model: gemini-2.5-flash
   temperature: 0.0
 
+rag:
+  mode: hybrid           # semantic (vectors only) | hybrid (vectors + BM25)
+
 
 embeddings:
   provider: huggingface             
@@ -10,6 +13,7 @@ embeddings:
 
 vector_store:
   provider: chromadb  # chromadb | qdrant
+  retrieval_mode: hybrid  # dense | sparse | hybrid
 
 
 qdrant:
