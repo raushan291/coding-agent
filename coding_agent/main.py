@@ -8,6 +8,7 @@ from coding_agent.agent.orchestrator import handle_query
 from coding_agent.config import config
 from coding_agent.context.indexers.factory import get_index_inspector, get_indexer
 from coding_agent.llm.factory import get_embedder, get_llm
+from coding_agent.memory.session import get_current_session, new_session, switch_session
 from coding_agent.observability.logger import get_logger
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -35,15 +36,17 @@ def initialize():
     )
 
     index = get_or_create_index()
+    session_id = get_current_session()
+    console.print(f"[dim]Session: {session_id}[/dim]")
     console.print("[green]✓ Ready[/green]\n")
-    return llm, embedder, index
+    return llm, embedder, index, session_id
 
 
 def run():
     logger.info("Starting Coding Agent")
     console.print("\n[bold blue]Coding Agent[/bold blue] — RAG-powered code assistant")
 
-    llm, embedder, index = initialize()
+    llm, embedder, index, session_id = initialize()
 
     console.print("Type [bold]'/exit'[/bold] or [bold]'/quit'[/bold] to quit\n")
 
@@ -60,17 +63,37 @@ def run():
             question = user_input.removeprefix("/ask ").strip()
             logger.info(f"Ask command received: {question}")
             console.print(f"[dim]Searching for: {question}...[/dim]")
-            response = handle_query(question)
+            response = handle_query(question, session_id)
             console.print(response)
-        elif user_input == "/show_semantic_index":
-            logger.info("Showing semantic index")
+        elif user_input == "/new_session":
+            session_id = new_session()
+            console.print(f"[green]New session started: {session_id}[/green]")
+        elif user_input.startswith("/switch "):
+            target = user_input.removeprefix("/switch ").strip()
+            session_id = switch_session(target)
+            console.print(f"[green]Switched to session: {session_id}[/green]")
+        elif user_input == "/session":
+            console.print(f"[dim]Current session: {session_id}[/dim]")
+        elif user_input == "/show_index":
+            logger.info("Showing index")
             get_index_inspector()(index)
         else:
             logger.warning(f"Unknown command received: {user_input}")
             console.print("[yellow]Unknown command. Try:[/yellow]")
-            console.print("  [bold]ask <question>[/bold] — ask a question")
             console.print(
-                "  [bold]show_semantic_index[/bold]  — show all chunks in the semantic index"
+                "  [bold]/ask <question>[/bold]          — ask a question about the codebase"
+            )
+            console.print(
+                "  [bold]/show_index[/bold]              — show all chunks in the index"
+            )
+            console.print(
+                "  [bold]/new_session[/bold]             — start a fresh conversation"
+            )
+            console.print(
+                "  [bold]/switch <session_id>[/bold]     — resume a past session"
+            )
+            console.print(
+                "  [bold]/session[/bold]                 — show current session id"
             )
 
 

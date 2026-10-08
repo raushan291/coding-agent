@@ -7,6 +7,10 @@ rag:
   mode: hybrid           # semantic (vectors only) | hybrid (vectors + BM25)
 
 
+memory:
+  db_path: .memory/memory.db
+
+
 embeddings:
   provider: huggingface             
   model: sentence-transformers/all-MiniLM-L6-v2
