@@ -5,14 +5,6 @@ from coding_agent.llm.factory import get_llm
 from coding_agent.mcp.mcp_client import get_mcp_tools
 from coding_agent.memory.short_term import get_summarization_middleware
 from coding_agent.observability.logger import get_logger
-from coding_agent.tools.filesystem_tools import (
-    append_file,
-    delete_file,
-    file_exists,
-    list_directory,
-    read_file,
-    write_file,
-)
 from coding_agent.tools.terminal_tools import run_command, run_in_directory
 
 logger = get_logger(__name__)
@@ -32,12 +24,6 @@ async def build_agent(checkpointer):
         search_codebase,
         run_command,
         run_in_directory,
-        read_file,
-        write_file,
-        append_file,
-        delete_file,
-        list_directory,
-        file_exists,
         *mcp_tools,
     ]
     middleware = get_summarization_middleware()
