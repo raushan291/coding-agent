@@ -2,10 +2,8 @@ from langchain.agents import create_agent
 
 from coding_agent.agent.tools import search_codebase
 from coding_agent.llm.factory import get_llm
-from coding_agent.memory.short_term import (
-    get_checkpointer,
-    get_summarization_middleware,
-)
+from coding_agent.mcp.mcp_client import get_mcp_tools
+from coding_agent.memory.short_term import get_summarization_middleware
 from coding_agent.observability.logger import get_logger
 from coding_agent.tools.filesystem_tools import (
     append_file,
@@ -26,9 +24,10 @@ Reference specific file names, function names and line numbers in your answers.
 If you cannot find the answer in the codebase, say so explicitly."""
 
 
-def build_agent():
+async def build_agent(checkpointer):
     """Create and return a LangChain agent with persistent memory."""
     llm = get_llm()
+    mcp_tools = await get_mcp_tools()
     tools = [
         search_codebase,
         run_command,
@@ -39,8 +38,8 @@ def build_agent():
         delete_file,
         list_directory,
         file_exists,
+        *mcp_tools,
     ]
-    checkpointer = get_checkpointer()
     middleware = get_summarization_middleware()
     logger.info("Creating agent")
     return create_agent(
