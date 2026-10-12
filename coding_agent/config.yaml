@@ -7,8 +7,17 @@ rag:
   mode: hybrid           # semantic (vectors only) | hybrid (vectors + BM25)
 
 
+skills:
+  skills_dir: .coding-agent/skills
+
+
+logging:
+  logs_dir: .coding-agent/logs
+  log_file: coding-agent.log
+
+
 memory:
-  db_path: .memory/memory.db
+  db_path: .coding-agent/memory/memory.db
   summarize_at_tokens: 4000
   keep_last_messages: 20
 
@@ -27,7 +36,7 @@ qdrant:
 
 
 chromadb:
-  persist_dir: .chromadb/
+  persist_dir: .coding-agent/chromadb/
   collection_name: codebase
 
 

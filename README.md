@@ -21,9 +21,17 @@ reasons.
   set `vector_store.provider` and nothing else changes.
 - **Hybrid retrieval.** Vector search runs alongside a keyword (BM25) search and the two results
   are fused, so exact identifiers surface even when embeddings would rank them lower.
-- **Runs on your machine.** With the default ChromaDB store your code never leaves the disk
-  index; the only outbound call is the embedder you configure. Qdrant is the exception — it sends
-  chunks wherever your Qdrant instance lives.
+- **Conversational memory.** Each project keeps persistent conversation threads in a local SQLite
+  store, and long threads are summarized automatically so context survives across launches.
+- **Skills.** Drop reusable instruction packages into a project and the agent discovers them and
+  loads their full instructions only when a request matches — see [Skills](#skills).
+- **Tools and MCP.** Beyond `search_codebase`, the agent can run shell commands and call external
+  [MCP servers](#mcp-servers) (GitHub and a launch-directory-scoped filesystem server ship by
+  default).
+- **Runs mostly on your machine.** With the default ChromaDB store your code never leaves the disk
+  index, and the embedder you configure is the only call needed for retrieval. The exceptions are
+  Qdrant (chunks go wherever your Qdrant instance lives) and the GitHub MCP server (see
+  [MCP servers](#mcp-servers)). Note the agent can also execute shell commands.
 
 ---
 
@@ -31,6 +39,7 @@ reasons.
 
 - Python `>=3.12,<4.0`
 - [pipx](https://pipx.pypa.io/installation/) (recommended) or [Poetry](https://python-poetry.org/docs/#installation)
+- [Node.js](https://nodejs.org/) (provides `npx`, used to launch the MCP servers on startup — see [MCP servers](#mcp-servers))
 - An API key for whichever LLM provider you configure
 
 ---
@@ -74,10 +83,8 @@ OPENAI_API_KEY=your-key-here
 ANTHROPIC_API_KEY=your-key-here
 
 
-# ChromaDB
-CHROMA_PERSIST_DIR=.chromadb/
-CHROMA_COLLECTION=codebase
-EMBEDDING_MODEL=text-embedding-3-small
+# MCP — GitHub server (only needed for the github MCP server)
+GITHUB_TOKEN=your-token-here
 
 
 # Qdrant (only needed if vector_store.provider is qdrant)
@@ -90,10 +97,10 @@ LANGSMITH_TRACING=false
 LANGSMITH_API_KEY=your-key-here
 ```
 
-Only the key for your configured provider is needed. One `.env` in this repo's root is enough for
-every project — the path is resolved from the installed package, not the working directory, so you
-can launch the agent from any directory. See the note below the config section if you're using a
-non-editable install.
+Only the key for your configured provider is needed, plus `GITHUB_TOKEN` if you want the GitHub MCP
+server to work. One `.env` in this repo's root is enough for every project — the path is resolved
+from the installed package, not the working directory, so you can launch the agent from any
+directory. See the note below the config section if you're using a non-editable install.
 
 **3. Run it**
 
@@ -105,12 +112,12 @@ cd /path/to/your/project
 coding-agent
 ```
 
-With the default ChromaDB store, each project you run it in gets its own `.chromadb/` index, so
-switching projects just means switching directories.
+With the default ChromaDB store, each project you run it in gets its own `.coding-agent/chromadb/`
+index, so switching projects just means switching directories.
 
 > **First run in a project takes a while.** The embedding model downloads on first use, and every
 > chunk is embedded individually — indexing a mid-sized repo can take several minutes. The result
-> is cached in that project's `.chromadb/`, so subsequent starts there are fast.
+> is cached in that project's `.coding-agent/chromadb/`, so subsequent starts there are fast.
 
 > **Qdrant is not per-project.** With `vector_store.provider: qdrant` the collection is a single
 > shared one named by `qdrant.collection_name` — it is not scoped to the directory you launched
@@ -123,7 +130,10 @@ switching projects just means switching directories.
 | Command | What it does |
 |---|---|
 | `/ask <question>` | Search the codebase and answer the question |
-| `/show_semantic_index` | Print every chunk in the index with its metadata and embedding |
+| `/show_index` | Print every chunk in the index with its metadata and embedding |
+| `/new_session` | Start a fresh conversation thread |
+| `/switch <session_id>` | Resume a previous conversation thread by id |
+| `/session` | Show the current session id |
 | `/exit` or `/quit` | Quit |
 
 Anything else prints the list of available commands.
@@ -133,8 +143,8 @@ Anything else prints the list of available commands.
 ## Configuration
 
 All settings live in `coding_agent/config.yaml`. Environment variables cover credentials and
-connection details only — provider API keys, plus `QDRANT_URL` / `QDRANT_API_KEY` when using
-Qdrant.
+connection details only — provider API keys, `GITHUB_TOKEN` for the GitHub MCP server, and
+`QDRANT_URL` / `QDRANT_API_KEY` when using Qdrant.
 
 `config.yaml` is read from alongside the installed package. With an editable install
 (`pipx install --editable .`) that means the copy in this repo — edit it and the change applies on
@@ -159,6 +169,18 @@ llm:
 rag:
   mode: hybrid           # semantic | hybrid
 
+skills:
+  skills_dir: .coding-agent/skills
+
+logging:
+  logs_dir: .coding-agent/logs
+  log_file: coding-agent.log
+
+memory:
+  db_path: .coding-agent/memory/memory.db
+  summarize_at_tokens: 4000
+  keep_last_messages: 20
+
 embeddings:
   provider: huggingface
   model: sentence-transformers/all-MiniLM-L6-v2
@@ -168,7 +190,7 @@ vector_store:
   retrieval_mode: hybrid  # dense | sparse | hybrid
 
 chromadb:
-  persist_dir: .chromadb/
+  persist_dir: .coding-agent/chromadb/
   collection_name: codebase
 
 qdrant:
@@ -197,7 +219,7 @@ qdrant:
 > **The embedder must stay the same between runs.** Indexing and retrieval both call
 > `get_embedder()`. If you change this model after indexing, existing chunks were embedded with
 > the old model and search results will be nonsense — drop the existing index and re-index (for
-> ChromaDB, delete `.chromadb/`; for Qdrant, delete the collection).
+> ChromaDB, delete `.coding-agent/chromadb/`; for Qdrant, delete the collection).
 
 ### `rag`
 
@@ -207,6 +229,24 @@ qdrant:
 
 `semantic` always searches embeddings only. `hybrid` adds a keyword (BM25) leg — see
 [Hybrid retrieval](#hybrid-retrieval) for how each backend implements it.
+
+### `memory`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `db_path` | `.coding-agent/memory/memory.db` | SQLite file holding conversation threads (per project) |
+| `summarize_at_tokens` | `4000` | Summarize a thread once it grows past this many tokens |
+| `keep_last_messages` | `20` | How many recent messages to keep verbatim when summarizing |
+
+Conversation history is persisted per thread so a session survives restarts. When a thread exceeds
+`summarize_at_tokens`, older messages are summarized down to `keep_last_messages` before the next
+turn, so long conversations don't keep growing the prompt.
+
+### `skills`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `skills_dir` | `.coding-agent/skills` | Directory scanned for skill packages — see [Skills](#skills) |
 
 ### `vector_store`
 
@@ -225,7 +265,7 @@ through a factory at call time, so the rest of the app never imports a concrete 
 
 | Key | Default | Purpose |
 |---|---|---|
-| `persist_dir` | `.chromadb/` | Where the vector store is written |
+| `persist_dir` | `.coding-agent/chromadb/` | Where the vector store is written |
 | `collection_name` | `codebase` | ChromaDB collection holding the chunks |
 
 Local, embedded, and per-directory — the default for everyday use.
@@ -245,10 +285,78 @@ Connection details come from the `QDRANT_URL` and `QDRANT_API_KEY` env vars, not
 > *skips* entirely when the collection already has points, which means running the agent in a
 > second project against a collection you already populated will silently answer questions about
 > the first project. Use a distinct `collection_name` per project, or stay on ChromaDB, which
-> isolates itself under each directory's `.chromadb/`.
+> isolates itself under each directory's `.coding-agent/chromadb/`.
 
 Unlike ChromaDB there is no local `persist_dir` — the index lives on the Qdrant server, and
 "clearing" it means dropping the collection.
+
+### `logging`
+
+| Key | Default | Purpose |
+|---|---|---|
+| `logs_dir` | `.coding-agent/logs` | Directory for the log file (created if missing) |
+| `log_file` | `coding-agent.log` | File name inside `logs_dir` |
+
+Each project logs to its own `.coding-agent/logs/` directory, so switching projects switches logs.
+
+---
+
+## Skills
+
+Skills are reusable instruction packages the agent loads only when a request matches. The agent sees
+each skill's name and description in its system prompt; when one is relevant it calls the
+`load_skill` tool to pull the full instructions into context for that turn.
+
+A skill is a folder containing a `SKILL.md`, discovered under `skills.skills_dir`:
+
+```
+.coding-agent/skills/
+    <name>/
+        SKILL.md            # required
+        scripts/            # optional support files
+        templates/          # optional support files
+        resources/          # optional support files
+```
+
+`SKILL.md` starts with YAML frontmatter followed by the instruction body:
+
+```markdown
+---
+name: python_debug
+description: Debug Python errors and tracebacks
+when_to_use: error, traceback, exception
+---
+
+You are an expert Python debugger. Follow these steps...
+```
+
+`name` and `description` are the required fields; `when_to_use` is optional but helps the agent
+decide when to load the skill. Any other files in the skill folder are listed to the agent so it can
+read them on demand if the instructions reference them.
+
+> **Each skill must live in its own `<name>/` subfolder.** A `SKILL.md` placed directly in the
+> skills dir (`skills/SKILL.md`) is treated as a stray file and skipped silently — the agent simply
+> won't see that skill.
+
+---
+
+## MCP servers
+
+[MCP](https://modelcontextprotocol.io/) servers extend the agent with external tools. They are
+declared in `mcp_servers.json` and connected on startup. Two ship by default:
+
+| Server | What it provides | Needs |
+|---|---|---|
+| `github` | GitHub API tools (issues, PRs, repos) | `GITHUB_TOKEN` in `.env` |
+| `filesystem` | File read/write/list tools scoped to the launch directory | — |
+
+Each entry has a `command`, `args`, and `transport`. `${VAR}` placeholders are substituted from the
+environment at load time, and `${CWD}` resolves to the directory the agent was launched from — which
+is what scopes the `filesystem` server to the project you're querying.
+
+> **The servers start via `npx`, so Node.js is required.** If a server fails to start (Node missing,
+> or a bad command), the agent reports an error instead of coming up. See
+> [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -303,21 +411,29 @@ source files
 embed each chunk ─────────────► configured vector store
                                  (ChromaDB on disk, or Qdrant)
 
-your question ──► agent ──► search_codebase tool
-                               │
-                               ├─ dense leg ────► vector store
-                               ├─ keyword leg ──► BM25 (ChromaDB) / sparse vectors (Qdrant)
-                               ▼
-                          reciprocal rank fusion
-                               │
-                               ▼
-                        top-5 chunks ──► answer
+your question ──► agent ──┬─► search_codebase tool
+                          │      │
+                          │      ├─ dense leg ────► vector store
+                          │      ├─ keyword leg ──► BM25 (ChromaDB) / sparse vectors (Qdrant)
+                          │      ▼
+                          │ reciprocal rank fusion
+                          │      │
+                          │      ▼
+                          │  top-5 chunks
+                          │
+                          ├─► load_skill        (skills, on demand)
+                          ├─► run_command / run_in_directory  (shell)
+                          └─► MCP tools         (github, filesystem)
+                                 │
+                                 ▼
+                         answer ──► persisted to conversation memory
 ```
 
-The agent is required to call `search_codebase` before answering, and is instructed to say so
-explicitly if the answer isn't in the codebase. That tool resolves a retriever through
-`context/retrievers/factory.py` on every call, so the backend and the search mode are both chosen
-from config at query time rather than fixed at import.
+The agent is required to call `search_codebase` before answering a codebase question, and is
+instructed to say so explicitly if the answer isn't in the codebase. That tool resolves a retriever
+through `context/retrievers/factory.py` on every call, so the backend and the search mode are both
+chosen from config at query time rather than fixed at import. The other tool families above (skills,
+shell, MCP) are registered on every agent build and available alongside it.
 
 ---
 
@@ -328,6 +444,7 @@ coding_agent/
 ├── main.py                          # REPL, bootstrap, index loading
 ├── config.py                        # loads config.yaml
 ├── config.yaml                      # all settings
+├── mcp_servers.json                 # external MCP server definitions
 ├── agent/
 │   ├── factory.py                   # builds the LangChain agent + system prompt
 │   ├── orchestrator.py              # handle_query() entry point
@@ -347,8 +464,19 @@ coding_agent/
 │       └── semantic_qdrant.py       # embed query + top-k search (Qdrant)
 ├── llm/
 │   └── factory.py                   # provider switching for LLM and embedder
+├── mcp/
+│   ├── mcp_client.py                # connects to MCP servers, returns their tools
+│   └── mcp_config.py                # loads mcp_servers.json + resolves ${VARS}
+├── memory/
+│   ├── session.py                   # current session id persistence
+│   └── short_term.py                # SQLite checkpointer + summarization middleware
+├── skills/
+│   ├── registry.py                  # discovers + parses SKILL.md packages
+│   └── skill_tools.py               # load_skill tool + skills prompt
+├── tools/
+│   └── terminal_tools.py            # run_command / run_in_directory
 └── observability/
-    └── logger.py                    # per-module loggers -> coding-agent.log
+    └── logger.py                    # per-module loggers -> .coding-agent/logs/
 ```
 
 ---
@@ -382,18 +510,19 @@ instead of duplicating them. Qdrant relies on LangChain-generated IDs instead.
 **Both indexers skip work when the store already has data** — ChromaDB checks `collection.count()`,
 Qdrant checks the collection's point count. This avoids duplicate chunks on a second run, but it
 also means neither picks up edits to code you've already indexed. To re-index after changing code,
-drop the index: delete `.chromadb/`, or delete the Qdrant collection.
+drop the index: delete `.coding-agent/chromadb/`, or delete the Qdrant collection.
 
 **Hybrid retrieval is the shipped default.** `rag.mode: hybrid` means ChromaDB queries go through
 `hybrid_chroma.retrieve`. Its BM25 index is built once per process, on the first query, and reused
 for the rest of the session — safe because indexing only runs at startup, so the stored documents
-cannot change underneath it. Rebuilding `.chromadb/` while the CLI is running therefore isn't seen
-until you restart. Qdrant's hybrid path builds no local index; `fastembed` handles the sparse side.
+cannot change underneath it. Rebuilding `.coding-agent/chromadb/` while the CLI is running therefore
+isn't seen until you restart. Qdrant's hybrid path builds no local index; `fastembed` handles the
+sparse side.
 
 **Skipped directories:** `.venv`, `venv`, `__pycache__`, `.git`, `node_modules`, `dist`, `build`.
 
-**Logging.** Each module gets its own logger at `DEBUG`, writing to `coding-agent.log` in the
-current working directory — so each project you query accumulates its own log. The root logger
+**Logging.** Each module gets its own logger at `DEBUG`, writing to `.coding-agent/logs/` in the
+project you launched from — so each project you query accumulates its own log. The root logger
 stays at `WARNING` so third-party libraries (OpenAI, Google, httpcore) don't flood the file.
 
 ---
@@ -401,7 +530,7 @@ stays at `WARNING` so third-party libraries (OpenAI, Google, httpcore) don't flo
 ## Troubleshooting
 
 **Search results look unrelated to the question.** The embedder changed since indexing — drop the
-existing index and restart to rebuild (`.chromadb/`, or the Qdrant collection).
+existing index and restart to rebuild (`.coding-agent/chromadb/`, or the Qdrant collection).
 
 **Answers are about the wrong project.** You're on Qdrant and reused a `collection_name` that was
 already populated from a different repo. Because indexing skips non-empty collections, the first
@@ -428,19 +557,31 @@ install, which reads the copy inside the virtualenv. Reinstall with `pipx instal
 **Authentication error on startup.** Your `.env` key doesn't match the configured provider. The key
 is read from this repo's root `.env` regardless of where you launched from.
 
-**Indexing seems stuck.** Check `coding-agent.log` in the directory you launched from — every
-indexed chunk is logged at `DEBUG`.
+**The agent fails to start, or MCP errors on startup.** The MCP servers launch via `npx`, so Node.js
+must be installed and on your `PATH`; the `github` server also needs `GITHUB_TOKEN` set in `.env`.
+Check `.coding-agent/logs/coding-agent.log` for the `Connecting to MCP servers` / `Loaded N tools`
+lines to see how far it got.
 
-**A project re-indexes every time.** ChromaDB found no existing index. Confirm `.chromadb/` exists
-in the directory you're running from and isn't being cleaned up. (On Qdrant this would show up
-instead as an index that never gets written — see "Qdrant errors" above.)
+**A skill isn't picked up.** The file must be `<skills_dir>/<name>/SKILL.md` — a `SKILL.md` placed
+directly in the skills dir is skipped silently. Confirm the layout and reload.
+
+**The conversation didn't reset.** Sessions resume from `.coding-agent/memory/current_session`.
+Use `/new_session` to start fresh, or `/switch <session_id>` to return to a previous thread.
+
+**Indexing seems stuck.** Check `.coding-agent/logs/coding-agent.log` in the project you launched
+from — every indexed chunk is logged at `DEBUG`.
+
+**A project re-indexes every time.** ChromaDB found no existing index. Confirm
+`.coding-agent/chromadb/` exists in the directory you're running from and isn't being cleaned up.
+(On Qdrant this would show up instead as an index that never gets written — see "Qdrant errors"
+above.)
 
 **Edits to indexed code are ignored.** Expected: both indexers skip when the store already holds
 data. Drop the index to pick up your changes.
 
 **The first `/ask` takes several seconds, the rest are fast.** The BM25 index over the whole
 collection is built on the first hybrid query and cached for the session. The build is logged at
-`INFO` in `coding-agent.log`.
+`INFO` in `.coding-agent/logs/coding-agent.log`.
 
 **A term I know is in the code returns nothing.** With `vector_store.retrieval_mode: sparse` only
 the keyword leg runs, and it needs alphanumeric query terms — a punctuation-only query matches

@@ -5,8 +5,8 @@
 .vscode/
 
 
-# Vector store data
-.chromadb/
+# Runtime state (vector store, memory, logs, skills)
+.coding-agent/
 
 
 # Python
