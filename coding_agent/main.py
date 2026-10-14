@@ -11,10 +11,13 @@ from coding_agent.agent.factory import build_agent
 from coding_agent.agent.orchestrator import handle_query
 from coding_agent.config import config
 from coding_agent.context.indexers.factory import get_index_inspector, get_indexer
+from coding_agent.context.indexers.watcher import start_watcher, stop_watcher
 from coding_agent.llm.factory import get_embedder, get_llm
 from coding_agent.memory.session import get_current_session, new_session, switch_session
 from coding_agent.memory.short_term import get_checkpointer_db_path
 from coding_agent.observability.logger import get_logger
+from coding_agent.tasks.orchestrator import handle_plan_command
+from coding_agent.tasks.status import show_task_status
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -43,11 +46,12 @@ async def initialize(checkpointer):
     )
 
     index = get_or_create_index()
+    observer = start_watcher(str(Path.cwd()))
     agent = await build_agent(checkpointer)
     session_id = get_current_session()
     console.print(f"[dim]Session: {session_id}[/dim]")
     console.print("[green]✓ Ready[/green]\n")
-    return llm, embedder, index, agent, session_id
+    return llm, embedder, index, agent, session_id, observer
 
 
 async def _run_async():
@@ -57,55 +61,80 @@ async def _run_async():
     async with AsyncSqliteSaver.from_conn_string(
         get_checkpointer_db_path()
     ) as checkpointer:
-        llm, embedder, index, agent, session_id = await initialize(checkpointer)
+        llm, embedder, index, agent, session_id, observer = await initialize(
+            checkpointer
+        )
 
         console.print("Type [bold]'/exit'[/bold] or [bold]'/quit'[/bold] to quit\n")
 
-        while True:
-            user_input = Prompt.ask("[bold green]>[/bold green]")
+        try:
+            while True:
+                user_input = Prompt.ask("[bold green]>[/bold green]")
 
-            if not user_input.strip():
-                continue
-            if user_input.lower() in ("/exit", "/quit"):
-                logger.info("Shutting down")
-                console.print("[dim]Goodbye![/dim]")
-                break
-            elif user_input.startswith("/ask "):
-                question = user_input.removeprefix("/ask ").strip()
-                logger.info(f"Ask command received: {question}")
-                console.print(f"[dim]Searching for: {question}...[/dim]")
-                response = await handle_query(agent, question, session_id)
-                console.print(response)
-            elif user_input == "/new_session":
-                session_id = new_session()
-                console.print(f"[green]New session started: {session_id}[/green]")
-            elif user_input.startswith("/switch "):
-                target = user_input.removeprefix("/switch ").strip()
-                session_id = switch_session(target)
-                console.print(f"[green]Switched to session: {session_id}[/green]")
-            elif user_input == "/session":
-                console.print(f"[dim]Current session: {session_id}[/dim]")
-            elif user_input == "/show_index":
-                logger.info("Showing index")
-                get_index_inspector()(index)
-            else:
-                logger.warning(f"Unknown command received: {user_input}")
-                console.print("[yellow]Unknown command. Try:[/yellow]")
-                console.print(
-                    "  [bold]/ask <question>[/bold]          — ask a question about the codebase"
-                )
-                console.print(
-                    "  [bold]/show_index[/bold]              — show all chunks in the index"
-                )
-                console.print(
-                    "  [bold]/new_session[/bold]             — start a fresh conversation"
-                )
-                console.print(
-                    "  [bold]/switch <session_id>[/bold]     — resume a past session"
-                )
-                console.print(
-                    "  [bold]/session[/bold]                 — show current session id"
-                )
+                if not user_input.strip():
+                    continue
+                if user_input.lower() in ("/exit", "/quit"):
+                    logger.info("Shutting down")
+                    console.print("[dim]Goodbye![/dim]")
+                    break
+                elif user_input.startswith("/ask "):
+                    question = user_input.removeprefix("/ask ").strip()
+                    logger.info(f"Ask command received: {question}")
+                    console.print(f"[dim]Searching for: {question}...[/dim]")
+                    response = await handle_query(agent, question, session_id)
+                    console.print(response)
+                elif user_input == "/reindex":
+                    console.print("[dim]Re-indexing current directory...[/dim]")
+                    get_or_create_index()
+                    console.print("[green]✓ Re-index complete.[/green]")
+                elif user_input == "/new_session":
+                    session_id = new_session()
+                    console.print(f"[green]New session started: {session_id}[/green]")
+                elif user_input.startswith("/switch "):
+                    target = user_input.removeprefix("/switch ").strip()
+                    session_id = switch_session(target)
+                    console.print(f"[green]Switched to session: {session_id}[/green]")
+                elif user_input == "/session":
+                    console.print(f"[dim]Current session: {session_id}[/dim]")
+                elif user_input == "/show_index":
+                    logger.info("Showing index")
+                    get_index_inspector()(index)
+                elif user_input.startswith("/plan "):
+                    goal = user_input.removeprefix("/plan ").strip()
+                    logger.info(f"Plan command received: {goal}")
+                    await handle_plan_command(goal)
+                elif user_input == "/task_status":
+                    show_task_status()
+                else:
+                    logger.warning(f"Unknown command received: {user_input}")
+                    console.print("[yellow]Unknown command. Try:[/yellow]")
+                    console.print(
+                        "  [bold]/ask <question>[/bold]          — ask a question about the codebase"
+                    )
+                    console.print(
+                        "  [bold]/show_index[/bold]              — show all chunks in the index"
+                    )
+                    console.print(
+                        "  [bold]/reindex[/bold]       — manually re-index current directory"
+                    )
+                    console.print(
+                        "  [bold]/new_session[/bold]             — start a fresh conversation"
+                    )
+                    console.print(
+                        "  [bold]/switch <session_id>[/bold]     — resume a past session"
+                    )
+                    console.print(
+                        "  [bold]/session[/bold]                 — show current session id"
+                    )
+                    console.print(
+                        "  [bold]/plan <goal>[/bold] — generate and execute a plan"
+                    )
+                    console.print(
+                        "  [bold]/task_status[/bold] — show task progress for active project"
+                    )
+        finally:
+            stop_watcher(observer)
+            logger.info("Stopped filesystem watcher")
 
 
 def run():

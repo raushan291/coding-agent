@@ -24,7 +24,7 @@ def get_llm():
             model=model, temperature=config["llm"].get("temperature", 0.0)
         )
 
-    if provider == "google":
+    if provider == "google_genai":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
