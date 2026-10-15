@@ -9,6 +9,7 @@ from rich.prompt import Prompt
 
 from coding_agent.agent.factory import build_agent
 from coding_agent.agent.orchestrator import handle_query
+from coding_agent.cache.redis_manager import ensure_redis
 from coding_agent.cache.semantic_cache import build_semantic_cache, get_repo_domain
 from coding_agent.config import config
 from coding_agent.context.indexers.factory import get_index_inspector, get_indexer
@@ -48,6 +49,7 @@ async def initialize(checkpointer):
 
     repo_path = str(Path.cwd())
     index = get_or_create_index()
+    await ensure_redis()
     semantic_cache = await build_semantic_cache()
     cache_domain = get_repo_domain(repo_path) if semantic_cache else None
     if semantic_cache is not None:

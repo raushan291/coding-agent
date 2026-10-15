@@ -44,6 +44,9 @@ semantic_cache:
   redis_url: redis://localhost:6379
   threshold: 0.85
   ttl: 86400
+  auto_start: true          # start Redis (via Docker) automatically when unreachable
+  container_name: redis-stack
+  start_timeout: 20         # seconds to wait for Redis readiness
 
 
 qdrant:
