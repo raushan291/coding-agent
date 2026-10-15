@@ -9,6 +9,7 @@ from rich.prompt import Prompt
 
 from coding_agent.agent.factory import build_agent
 from coding_agent.agent.orchestrator import handle_query
+from coding_agent.cache.semantic_cache import build_semantic_cache, get_repo_domain
 from coding_agent.config import config
 from coding_agent.context.indexers.factory import get_index_inspector, get_indexer
 from coding_agent.context.indexers.watcher import start_watcher, stop_watcher
@@ -35,7 +36,7 @@ def get_or_create_index():
 
 
 async def initialize(checkpointer):
-    """Bootstrap LLM, embedder, and index before the REPL starts."""
+    """Bootstrap LLM, embedder, index, watcher, MCP tools, cache, and session before the REPL starts."""
     llm = get_llm()
     embedder = get_embedder()
     console.print(
@@ -45,13 +46,40 @@ async def initialize(checkpointer):
         f"[dim]Embedder: {config['embeddings']['provider']} / {config['embeddings']['model']}[/dim]"
     )
 
+    repo_path = str(Path.cwd())
     index = get_or_create_index()
-    observer = start_watcher(str(Path.cwd()))
+    semantic_cache = await build_semantic_cache()
+    cache_domain = get_repo_domain(repo_path) if semantic_cache else None
+    if semantic_cache is not None:
+        console.print(
+            f"[dim]Semantic cache: enabled (threshold={semantic_cache.threshold})[/dim]"
+        )
+    else:
+        console.print("[dim]Semantic cache: disabled[/dim]")
+
+    loop = asyncio.get_running_loop()
+
+    def _invalidate_cache_on_change() -> None:
+        if semantic_cache is not None:
+            asyncio.run_coroutine_threadsafe(
+                semantic_cache.invalidate_domain(cache_domain), loop
+            )
+
+    observer = start_watcher(repo_path, on_change=_invalidate_cache_on_change)
     agent = await build_agent(checkpointer)
     session_id = get_current_session()
     console.print(f"[dim]Session: {session_id}[/dim]")
     console.print("[green]✓ Ready[/green]\n")
-    return llm, embedder, index, agent, session_id, observer
+    return (
+        llm,
+        embedder,
+        index,
+        agent,
+        session_id,
+        observer,
+        semantic_cache,
+        cache_domain,
+    )
 
 
 async def _run_async():
@@ -61,9 +89,16 @@ async def _run_async():
     async with AsyncSqliteSaver.from_conn_string(
         get_checkpointer_db_path()
     ) as checkpointer:
-        llm, embedder, index, agent, session_id, observer = await initialize(
-            checkpointer
-        )
+        (
+            llm,
+            embedder,
+            index,
+            agent,
+            session_id,
+            observer,
+            semantic_cache,
+            cache_domain,
+        ) = await initialize(checkpointer)
 
         console.print("Type [bold]'/exit'[/bold] or [bold]'/quit'[/bold] to quit\n")
 
@@ -81,11 +116,22 @@ async def _run_async():
                     question = user_input.removeprefix("/ask ").strip()
                     logger.info(f"Ask command received: {question}")
                     console.print(f"[dim]Searching for: {question}...[/dim]")
-                    response = await handle_query(agent, question, session_id)
+                    response = await handle_query(
+                        agent,
+                        question,
+                        session_id,
+                        semantic_cache=semantic_cache,
+                        cache_domain=cache_domain,
+                    )
                     console.print(response)
                 elif user_input == "/reindex":
                     console.print("[dim]Re-indexing current directory...[/dim]")
                     get_or_create_index()
+                    if semantic_cache is not None:
+                        await semantic_cache.invalidate_domain(cache_domain)
+                        console.print(
+                            "[dim]Semantic cache invalidated for this repo.[/dim]"
+                        )
                     console.print("[green]✓ Re-index complete.[/green]")
                 elif user_input == "/new_session":
                     session_id = new_session()

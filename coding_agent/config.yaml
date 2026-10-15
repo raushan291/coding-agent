@@ -31,11 +31,19 @@ memory:
 embeddings:
   provider: huggingface             
   model: sentence-transformers/all-MiniLM-L6-v2
+  dims: 384
 
 
 vector_store:
   provider: chromadb  # chromadb | qdrant
   retrieval_mode: hybrid  # dense | sparse | hybrid
+
+
+semantic_cache:
+  enabled: true
+  redis_url: redis://localhost:6379
+  threshold: 0.85
+  ttl: 86400
 
 
 qdrant:

@@ -63,6 +63,7 @@ def get_embedder():
         from langchain_huggingface import HuggingFaceEmbeddings
 
         return HuggingFaceEmbeddings(model_name=model)
+
     else:
         raise ValueError(
             f"Unsupported embeddings provider: {provider}\nSupported providers: 'openai', 'huggingface', 'anthropic', 'google'."
