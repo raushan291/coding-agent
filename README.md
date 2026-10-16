@@ -49,6 +49,10 @@ $ coding-agent
 
 ---
 
+## System Architecture
+
+![System Architecture](./docs/coding_agent_architecture.png)
+
 ## Requirements
 
 - Python `>=3.12,<4.0`
