@@ -51,7 +51,11 @@ $ coding-agent
 
 ## System Architecture
 
+System Architecture
+
 ![System Architecture](./docs/coding_agent_architecture.png)
+
+Simplified view
 
 ![Simplified view](./docs/coding_agent_architecture_simplified.png)
 
